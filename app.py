@@ -8,9 +8,37 @@ import urllib.parse
 # ================= 設定區 =================
 st.set_page_config(page_title="家庭小金庫系統", page_icon="🪙", layout="wide")
 
-# 請替換為您的 Google Apps Script 網頁應用程式網址與部署 URL
+# 請替換為您的 Google Apps Script 網頁應用程式網址
 GAS_URL = st.secrets.get("GAS_URL", "https://script.google.com/macros/s/AKfycbxfSRHmom9AE2qVilpbGDFShNu1JgQDq1jw1IBPrzqVwrBDKh3XqK7hs4fxG3JLzp61/exec")
-APP_BASE_URL = st.secrets.get("APP_BASE_URL", "http://localhost:8501")
+
+def get_app_base_url():
+    """自動取得目前 Streamlit 雲端部署的真實網址"""
+    # 1. 若 secrets 有設定且不是 localhost，優先使用
+    try:
+        secret_url = st.secrets.get("APP_BASE_URL", "")
+        if secret_url and "localhost" not in secret_url and "請填入" not in secret_url:
+            return secret_url.rstrip("/")
+    except Exception:
+        pass
+
+    # 2. 自動從瀏覽器連線標頭抓取真實雲端網址 (例如 https://xxx.streamlit.app)
+    try:
+        headers = st.context.headers
+        if headers:
+            host = headers.get("X-Forwarded-Host") or headers.get("Host") or headers.get("host")
+            proto = headers.get("X-Forwarded-Proto") or "https"
+            if host and "localhost" not in host and "127.0.0.1" not in host:
+                return f"{proto}://{host}".rstrip("/")
+            
+            origin = headers.get("Origin") or headers.get("Referer")
+            if origin and "localhost" not in origin:
+                parsed = urllib.parse.urlparse(origin)
+                if parsed.scheme and parsed.netloc:
+                    return f"{parsed.scheme}://{parsed.netloc}"
+    except Exception:
+        pass
+
+    return st.session_state.get("custom_base_url", "")
 
 # ================= 輔助函式 =================
 def clean_date_str(val):
@@ -178,6 +206,8 @@ if not kid_ids:
 # 檢查網址參數是否為掃描 QR Code 進入 (例如 ?kid=kid1)
 query_params = st.query_params
 qr_kid_id = query_params.get("kid", None)
+if isinstance(qr_kid_id, list):
+    qr_kid_id = qr_kid_id[0]
 
 # 若為掃描 QR Code 進入，直接顯示小孩專屬小金庫頁面
 if qr_kid_id and qr_kid_id in all_data:
@@ -214,13 +244,27 @@ cur_ratio = float(current_kid.get("available_ratio", 0.30))
 cur_rate = float(current_kid.get("interest_rate", 0.05))
 metrics = calculate_account_metrics(current_kid.get("records", []), cur_ratio, cur_rate)
 
-# 側邊欄：QR Code 產生器
+# 側邊欄：QR Code 產生器 (自動偵測真實雲端網址)
 st.sidebar.markdown("---")
 st.sidebar.subheader(f"📱 {current_kid['name']}的小金庫 QR Code")
-kid_qr_url = f"{APP_BASE_URL}/?kid={selected_kid}"
-qr_img_url = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={urllib.parse.quote(kid_qr_url)}"
-st.sidebar.image(qr_img_url, caption=f"掃描查看 {current_kid['name']}的小金庫", width=180)
-st.sidebar.caption(f"專屬連結：`{kid_qr_url}`")
+
+base_url = get_app_base_url()
+if not base_url:
+    base_url = st.sidebar.text_input(
+        "🌐 請貼上本網頁的雲端網址",
+        placeholder="https://xxxx.streamlit.app",
+        help="請複製瀏覽器第一個分頁網址列的 https://xxx.streamlit.app 貼上"
+    ).strip().rstrip("/")
+    st.session_state["custom_base_url"] = base_url
+
+if base_url:
+    kid_qr_url = f"{base_url}/?kid={selected_kid}"
+    qr_img_url = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={urllib.parse.quote(kid_qr_url, safe='')}"
+    st.sidebar.image(qr_img_url, caption=f"掃描查看 {current_kid['name']}的小金庫", width=180)
+    st.sidebar.markdown(f"🔗 **專屬連結：** [點此開啟 {current_kid['name']}的小金庫]({kid_qr_url})")
+    st.sidebar.code(kid_qr_url, language=None)
+else:
+    st.sidebar.info("👆 請先於上方欄位貼上您的 Streamlit 網址以產生 QR Code")
 
 # 側邊欄：爸媽設定區 (含年利率設定)
 st.sidebar.markdown("---")
