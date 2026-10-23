@@ -9,7 +9,7 @@ import urllib.parse
 st.set_page_config(page_title="家庭小銀行存摺系統", page_icon="🏦", layout="wide")
 
 # 請替換為您的 Google Apps Script 網頁應用程式網址与部署 URL
-GAS_URL = st.secrets.get("GAS_URL", "請填入您的_GAS_WEB_APP_URL")
+GAS_URL = st.secrets.get("GAS_URL", "https://script.google.com/macros/s/AKfycbxfSRHmom9AE2qVilpbGDFShNu1JgQDq1jw1IBPrzqVwrBDKh3XqK7hs4fxG3JLzp61/exec")
 APP_BASE_URL = st.secrets.get("APP_BASE_URL", "http://localhost:8501")
 
 # ================= 輔助函式 =================
