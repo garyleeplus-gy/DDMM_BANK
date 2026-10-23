@@ -8,7 +8,7 @@ import urllib.parse
 # ================= 網頁基本設定 =================
 st.set_page_config(page_title="爸媽銀行數位存摺", page_icon="🏦", layout="wide")
 
-GAS_URL = st.secrets.get("gas_url", "請替換成你的_Apps_Script_網址")
+GAS_URL = st.secrets.get("gas_url", "https://script.google.com/macros/s/AKfycbzySXOfNochuH-gbJi9fwSdahcqUl9K8cyvGNA8w65fpdGzZ5lDuQScosely_AllRFe/exec")
 ADMIN_PIN = st.secrets.get("admin_pin", "8888")
 
 # ================= 自動取得目前 Streamlit 真實網址 =================
