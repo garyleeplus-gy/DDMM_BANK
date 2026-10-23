@@ -7,7 +7,7 @@ import urllib.parse
 st.set_page_config(page_title="爸媽銀行 Parents' Bank", page_icon="🏦", layout="centered")
 
 # 可從 Streamlit Secrets 讀取，也可直接把下方的預設字串換成你的 Apps Script 網址
-GAS_URL = st.secrets.get("gas_url", "請將這裡替換成你的_Apps_Script_網址")
+GAS_URL = st.secrets.get("gas_url", "https://script.google.com/macros/s/AKfycbzySXOfNochuH-gbJi9fwSdahcqUl9K8cyvGNA8w65fpdGzZ5lDuQScosely_AllRFe/exec")
 ADMIN_PIN = st.secrets.get("admin_pin", "8888")
 
 # ================= Google Sheets (Apps Script) 讀寫函數 =================
