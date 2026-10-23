@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
+import json
 from datetime import datetime
 import urllib.parse
 
@@ -21,19 +22,32 @@ def get_auto_base_url():
         pass
     return ""
 
-# ================= Google Sheets 讀寫函數 =================
+# ================= Google Sheets 讀寫函數（防轉址卡死版） =================
 @st.cache_data(ttl=30)
 def load_all_data():
     if not GAS_URL.startswith("https://script.google.com/"):
         st.warning("⚠️ 請先在 Streamlit Secrets 設定正確的 `gas_url`！")
         st.stop()
-    resp = requests.get(GAS_URL, timeout=15)
+    resp = requests.get(GAS_URL, timeout=20)
     resp.raise_for_status()
     return resp.json()
 
 def post_to_sheet(payload):
-    resp = requests.post(GAS_URL, json=payload, timeout=15)
-    resp.raise_for_status()
+    """
+    透過 text/plain 與 allow_redirects=False 傳送資料：
+    當 Google Apps Script 執行完 doPost 並回傳 302 時即代表寫入完成，
+    直接略過後續轉址，徹底解決 Python 3.14 ReadTimeout 問題。
+    """
+    headers = {"Content-Type": "text/plain;charset=utf-8"}
+    resp = requests.post(
+        GAS_URL,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+        allow_redirects=False,
+        timeout=30
+    )
+    if resp.status_code not in (200, 302):
+        resp.raise_for_status()
     st.cache_data.clear()
 
 def recalc_records(df_in):
@@ -42,14 +56,13 @@ def recalc_records(df_in):
     running_balance = 0
     for _, row in df_in.iterrows():
         date_str = str(row.get("日期", "")).strip()
-        if date_str == "nan" or date_str == "None":
+        if date_str in ("nan", "None"):
             date_str = ""
         inc = int(pd.to_numeric(row.get("收入", 0), errors="coerce") or 0)
         exp = int(pd.to_numeric(row.get("支出", 0), errors="coerce") or 0)
         note_str = str(row.get("備註", "")).strip()
-        if note_str == "nan" or note_str == "None":
+        if note_str in ("nan", "None"):
             note_str = ""
-        # 跳過完全空白的列
         if not date_str and inc == 0 and exp == 0 and not note_str:
             continue
         running_balance += (inc - exp)
@@ -66,14 +79,13 @@ def recalc_records(df_in):
 try:
     data = load_all_data()
 except Exception as e:
-    st.error("⚠️ 無法讀取 Google 試算表，請確認 Apps Script 已更新為「新版本」且權限為「所有人」。")
+    st.error("⚠️ 無法讀取 Google 試算表，請確認 Apps Script 網址正確且權限為「所有人」。")
     st.exception(e)
     st.stop()
 
 # ================= 讀取 QR Code 網址參數 =================
 query_params = st.query_params
 url_kid = query_params.get("kid", None)
-# 防止網址不小心帶有斜線，例如 kid1/
 if url_kid:
     url_kid = url_kid.split("/")[0].split("?")[0]
 
@@ -88,6 +100,10 @@ with st.sidebar:
         st.success("✅ 已開啟爸媽編輯模式！")
     else:
         st.caption("目前為「小孩查帳模式（唯讀）」，輸入密碼即可新增或直接修改表格。")
+
+    if st.button("🔄 強制重新讀取試算表", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
 
 # 標題與帳戶切換
 st.title("🏦 爸媽銀行數位存摺")
@@ -105,7 +121,19 @@ else:
     )
 
 account = data[selected_kid]
+
+# 自動檢查 Apps Script 是否忘記更新部署版本
+if "records" not in account:
+    st.error(
+        "⚠️ **偵測到你的 Google Apps Script 還在執行舊版程式！**\n\n"
+        "請打開 Google 試算表的「擴充功能 → Apps Script」，貼上新版程式碼並按儲存後，務必點選右上角 "
+        "**「部署」→「管理部署作業」→ 點選右上角「✏️ 編輯」→ 版本選擇「新版本」→ 按下「部署」**，才能啟用新版表格讀寫功能！"
+    )
+    st.stop()
+
 ratio = float(account.get("available_ratio", 0.30))
+if ratio > 1.0:  # 防呆：避免讀到舊版欄位數字
+    ratio = 0.30
 records = account.get("records", [])
 
 # 轉換為 DataFrame 並計算頂部 Excel 看板數字
@@ -177,7 +205,7 @@ else:
 
     # 爸媽專屬：像 Excel 一樣直接修改表格
     st.markdown("### ✏️ 手動修改存摺內容（可直接點選格子修改、新增或刪除列）")
-    st.caption("💡 提示：直接點兩下表格內的文字或數字即可修改；修改完畢後請務必點擊下方的「💾 儲存表格修改」按鈕，系統會自動重算每一列的餘額並永久存入 Google Sheet！")
+    st.caption("💡 提示：直接點兩下表格內的文字或數字即可修改；修改完畢後請點擊下方的「💾 儲存表格修改」按鈕，系統會自動重算每一列的餘額並永久存入 Google Sheet！")
     
     edited_df = st.data_editor(
         df,
@@ -228,7 +256,6 @@ with st.sidebar:
         "你的 Streamlit 網址（已自動偵測）",
         value=auto_url if auto_url else "https://請貼上你的網址.streamlit.app"
     )
-    # 自動清理網址：去除任何不小心貼上的 ?kid=... 避免重複疊加
     clean_base_url = raw_url.split("?")[0].rstrip("/")
     target_url = f"{clean_base_url}/?kid={selected_kid}"
     
