@@ -2,327 +2,361 @@ import streamlit as st
 import pandas as pd
 import requests
 from datetime import datetime, date
+import re
 import urllib.parse
 
-# ================= 網頁基本設定 =================
-st.set_page_config(page_title="爸媽銀行數位存摺", page_icon="🏦", layout="wide")
+# ================= 設定區 =================
+st.set_page_config(page_title="家庭小銀行存摺系統", page_icon="🏦", layout="wide")
 
-GAS_URL = st.secrets.get("gas_url", "請替換成你的_Apps_Script_網址")
-ADMIN_PIN = st.secrets.get("admin_pin", "8888")
+# 請替換為您的 Google Apps Script 網頁應用程式網址与部署 URL
+GAS_URL = st.secrets.get("GAS_URL", "請填入您的_GAS_WEB_APP_URL")
+APP_BASE_URL = st.secrets.get("APP_BASE_URL", "http://localhost:8501")
 
-def get_auto_base_url():
+# ================= 輔助函式 =================
+def clean_date_str(val):
+    """將任何英文日期字串 (如 Fri Jul 11 2025...) 強制轉為純數字 2025/07/11"""
+    if pd.isna(val) or not str(val).strip():
+        return ""
+    s = str(val).strip()
+    # 若已是 YYYY/MM/DD 或 YYYY-MM-DD
+    m = re.match(r"^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})", s)
+    if m:
+        return f"{int(m.group(1)):04d}/{int(m.group(2)):02d}/{int(m.group(3)):02d}"
+    # 處理英文日期字串 Fri Jul 11 2025 00:00:00 GMT+0800 (...)
+    s_clean = re.sub(r"\s*\(.*?\)", "", s)
+    s_clean = re.sub(r"\s*GMT[+-]\d{4}", "", s_clean)
     try:
-        host = st.context.headers.get("Host", "")
-        if host:
-            protocol = "http" if ("localhost" in host or "127.0.0.1" in host) else "https"
-            return f"{protocol}://{host}"
+        dt = pd.to_datetime(s_clean)
+        return dt.strftime("%Y/%m/%d")
     except Exception:
-        pass
-    return ""
+        return s
 
-@st.cache_data(ttl=30)
-def load_all_data():
-    if not GAS_URL.startswith("https://script.google.com/"):
-        st.warning("⚠️ 請先在 Streamlit Secrets 設定正確的 `gas_url`！")
-        st.stop()
-    resp = requests.get(GAS_URL, timeout=20)
+@st.cache_data(ttl=10)
+def fetch_all_data():
+    resp = requests.get(GAS_URL, timeout=15)
     resp.raise_for_status()
     return resp.json()
 
-def post_to_sheet(payload):
-    headers = {"Content-Type": "text/plain;charset=utf-8"}
-    resp = requests.post(
-        GAS_URL,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers=headers,
-        allow_redirects=False,
-        timeout=30
-    )
-    if resp.status_code not in (200, 302):
-        resp.raise_for_status()
-    st.cache_data.clear()
-
-def recalc_records(df_in):
-    records = []
-    running_balance = 0
-    for _, row in df_in.iterrows():
-        date_str = str(row.get("日期", "")).strip()
-        if date_str in ("nan", "None"):
-            date_str = ""
-        inc = int(pd.to_numeric(row.get("收入", 0), errors="coerce") or 0)
-        exp = int(pd.to_numeric(row.get("支出", 0), errors="coerce") or 0)
-        note_str = str(row.get("備註", "")).strip()
-        if note_str in ("nan", "None"):
-            note_str = ""
-        if not date_str and inc == 0 and exp == 0 and not note_str:
-            continue
-        running_balance += (inc - exp)
-        records.append({
-            "date": date_str,
-            "income": inc,
-            "expense": exp,
-            "note": note_str,
-            "balance": running_balance
-        })
-    return records
-
-# 計算依年利率與持有天數產生的利息
-def calculate_interest(records, annual_rate):
+def calculate_account_metrics(records, available_ratio, interest_rate):
     """
-    根據每一筆收入的日期到今天的天數，計算累積年利息。
-    公式：利息 = 存款金額 × 年利率 × (持有天數 / 365)
+    計算本金餘額、年利率累積利息、含息總餘額、含息可用餘額
     """
-    total_interest = 0.0
     today = date.today()
+    total_income = 0
+    total_expense = 0
+    total_interest = 0.0
+    last_valid_date = today
+
+    cleaned_records = []
+    running_principal = 0
+
     for r in records:
-        inc = r.get("income", 0)
-        d_str = r.get("date", "")
-        if inc > 0 and d_str:
+        d_str = clean_date_str(r.get("date", ""))
+        inc = int(float(r.get("income", 0) or 0))
+        exp = int(float(r.get("expense", 0) or 0))
+        note = str(r.get("note", "") or "")
+
+        if d_str:
             try:
-                # 嘗試解析各種日期格式
-                d_obj = None
-                for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S"):
-                    try:
-                        d_obj = datetime.strptime(d_str.split()[0], fmt.split()[0]).date()
-                        break
-                    except ValueError:
-                        continue
-                if d_obj:
-                    days = (today - d_obj).days
-                    if days > 0:
-                        interest_item = inc * annual_rate * (days / 365.0)
-                        total_interest += interest_item
+                tx_date = datetime.strptime(d_str, "%Y/%m/%d").date()
+                last_valid_date = tx_date
             except Exception:
-                pass
-    return int(round(total_interest))
-
-# ================= 載入資料 =================
-try:
-    data = load_all_data()
-except Exception as e:
-    st.error("⚠️ 無法讀取 Google 試算表，請確認 Apps Script 網址正確且權限為「所有人」。")
-    st.exception(e)
-    st.stop()
-
-# ================= 讀取 QR Code 網址參數 =================
-query_params = st.query_params
-url_kid = query_params.get("kid", None)
-if url_kid:
-    url_kid = url_kid.split("/")[0].split("?")[0]
-
-kid_keys = list(data.keys())
-
-# 側邊欄：爸媽行員登入區
-with st.sidebar:
-    st.header("🔐 爸媽管理後台")
-    pin_input = st.text_input("輸入爸媽密碼解鎖編輯 (預設 8888)", type="password")
-    is_admin = (pin_input == ADMIN_PIN)
-    if is_admin:
-        st.success("✅ 已開啟爸媽編輯模式！")
-    else:
-        st.caption("目前為「小孩查帳模式」，輸入密碼即可解鎖管理後台與設定。")
-
-    if st.button("🔄 強制重新讀取試算表", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
-
-# 判斷是否為「小孩掃 QR Code 進入」（無密碼且網址帶有 kid 參數）
-is_kid_scan = (url_kid in kid_keys and not is_admin)
-
-# ================= 選擇帳戶 =================
-if is_kid_scan:
-    selected_kid = url_kid
-else:
-    default_idx = kid_keys.index(url_kid) if url_kid in kid_keys else 0
-    selected_kid = st.selectbox(
-        "選擇要查看的小孩帳戶 (支援最多 5 名)：",
-        options=kid_keys,
-        index=default_idx,
-        format_func=lambda k: f"{data[k]['name']} ({k})"
-    )
-
-account = data[selected_kid]
-name = account.get("name", "小朋友")
-ratio = float(account.get("available_ratio", 0.30))
-annual_rate = float(account.get("annual_interest_rate", 0.05))
-records = account.get("records", [])
-
-if "records" not in account:
-    st.error("⚠️ 請更新 Google Apps Script 版本以支援 5 名小孩與新資料結構！")
-    st.stop()
-
-# 處理 DataFrame 與計算金額
-if records:
-    df = pd.DataFrame(records)
-    df.columns = ["日期", "收入", "支出", "備註", "餘額"]
-else:
-    df = pd.DataFrame(columns=["日期", "收入", "支出", "備註", "餘額"])
-
-total_income = int(df["收入"].sum()) if not df.empty else 0
-total_expense = int(df["支出"].sum()) if not df.empty else 0
-base_balance = total_income - total_expense
-
-# 計算利息並併入總餘額與可用金額
-earned_interest = calculate_interest(records, annual_rate)
-total_balance = base_balance + earned_interest                 # 總存款（含利息）
-total_available_quota = round(total_income * ratio)          # 可用金額總額度
-spendable_now = max(0, total_available_quota - total_expense + earned_interest) # 目前可花金額
-
-# ================= 📱 小孩專屬掃碼檢視（童趣時速表介面） =================
-if is_kid_scan:
-    st.markdown(f"<h1 style='text-align: center; color: #4A90E2;'>✨ {name}的專屬財富時速表 ✨</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: gray;'>隨時掌握你的存錢進度，錢錢正在長大中！</p>", unsafe_allow_html=True)
-    st.markdown("---")
-    
-    # 用醒目的視覺儀表板呈現
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric(
-            label="🚀 目前可花金額 (時速)", 
-            value=f"${spendable_now:,}", 
-            delta="可以自由花用的零用錢",
-            delta_color="normal"
-        )
-    with col2:
-        st.metric(
-            label="💰 總存款餘額 (含利息)", 
-            value=f"${total_balance:,}", 
-            delta=f"含銀行紅利利息 +${earned_interest:,}",
-            delta_color="off"
-        )
-    with col3:
-        st.metric(
-            label="📈 銀行滾入利息", 
-            value=f"${earned_interest:,}", 
-            delta=f"年利率 {int(annual_rate*100)}%",
-            delta_color="normal"
-        )
-    
-    st.markdown("---")
-    st.markdown("### 🎯 存錢加油進度條")
-    # 趣味進度條
-    progress_val = min(spendable_now / max(total_available_quota, 1), 1.0)
-    st.progress(progress_val, text=f"可用額度使用比例：{int(progress_val * 100)}%")
-    
-    st.markdown("### 📖 最近的存錢紀錄")
-    if not df.empty:
-        st.dataframe(df.tail(5), use_container_width=True, hide_index=True)
-    else:
-        st.info("目前還沒有交易紀錄喔！")
-        
-    st.stop() # 小孩模式到此為止，不顯示後台編輯器
-
-# ================= 💻 爸媽完整管理後台介面 =================
-st.title(f"🏦 爸媽銀行數位存摺 - 【{name}】的管理後台")
-
-st.markdown("### 📊 帳戶金額總覽（含複利利息）")
-c1, c2, c3, c4 = st.columns(4)
-
-with c1:
-    st.metric(label="🟢 目前可花金額 (餘額)", value=f"${spendable_now:,}", delta="現在可以動用的錢")
-with c2:
-    st.metric(label="💰 總存款 (含利息)", value=f"${total_balance:,}", delta=f"本金 ${base_balance:,} + 利息 ${earned_interest:,}", delta_color="off")
-with c3:
-    st.metric(label=f"📈 累積紅利利息 ({int(annual_rate*100)}%年利率)", value=f"${earned_interest:,}")
-with c4:
-    st.metric(label="💸 累計已支出", value=f"${total_expense:,}")
-
-st.markdown("---")
-
-# 爸媽專屬：快速記一筆
-st.markdown("### ➕ 快速新增一筆收支")
-with st.form("quick_add_form", clear_on_submit=True):
-    f1, f2, f3, f4 = st.columns([2, 2, 2, 4])
-    with f1:
-        new_date = st.text_input("日期", value=datetime.now().strftime("%Y/%m/%d"))
-    with f2:
-        new_inc = st.number_input("收入 (存入金額)", min_value=0, value=0, step=50)
-    with f3:
-        new_exp = st.number_input("支出 (領出金額)", min_value=0, value=0, step=10)
-    with f4:
-        new_note = st.text_input("備註內容 (例如：國語期末考100、買卡包)")
-        
-    submitted = st.form_submit_button("➕ 新增這筆紀錄並存檔", type="primary")
-    if submitted:
-        if new_inc == 0 and new_exp == 0:
-            st.error("收入與支出不能同時為 0 喔！")
-        elif new_exp > spendable_now and new_inc == 0:
-            st.error(f"🚫 超出可花金額！目前可花金額只有 ${spendable_now} 元。")
+                tx_date = last_valid_date
         else:
-            new_row = pd.DataFrame([{
-                "日期": new_date, "收入": new_inc, "支出": new_exp, "備註": new_note, "餘額": 0
-            }])
-            updated_df = pd.concat([df, new_row], ignore_index=True)
-            updated_records = recalc_records(updated_df)
-            with st.spinner("正在寫入 Google 試算表..."):
-                post_to_sheet({
-                    "action": "save_table",
-                    "kid_id": selected_kid,
-                    "records": updated_records
-                })
-            st.toast("✅ 已新增並同步至 Google 試算表！")
-            st.rerun()
+            tx_date = last_valid_date
+            d_str = tx_date.strftime("%Y/%m/%d")
 
-# 爸媽專屬：像 Excel 一樣直接修改表格
-st.markdown("### ✏️ 手動修改存摺內容（可直接點選格子修改、新增或刪除列）")
-edited_df = st.data_editor(
-    df,
-    num_rows="dynamic",
-    use_container_width=True,
-    hide_index=True,
-    column_config={
-        "日期": st.column_config.TextColumn("日期 (YYYY/MM/DD)"),
-        "收入": st.column_config.NumberColumn("收入", min_value=0, step=1, format="%d"),
-        "支出": st.column_config.NumberColumn("支出", min_value=0, step=1, format="%d"),
-        "備註": st.column_config.TextColumn("備註內容"),
-        "餘額": st.column_config.NumberColumn("餘額 (存檔後自動重算)", disabled=True, format="%d")
+        # 計算該筆收支距今天數與單利年息
+        days_held = max(0, (today - tx_date).days)
+        net_flow = inc - exp
+        total_interest += net_flow * float(interest_rate) * (days_held / 365.0)
+
+        total_income += inc
+        total_expense += exp
+        running_principal += net_flow
+
+        cleaned_records.append({
+            "日期": d_str,
+            "收入": inc,
+            "支出": exp,
+            "備註": note,
+            "餘額": running_principal
+        })
+
+    earned_interest = max(0, int(round(total_interest)))
+    principal_balance = total_income - total_expense
+    
+    # 1. 總餘額 (本金餘額 + 利息)
+    total_balance_with_interest = principal_balance + earned_interest
+    
+    # 2. 可用總額度 (總收入 * 可用比例 + 利息) 與 目前可用金額
+    available_quota = int(round(total_income * float(available_ratio))) + earned_interest
+    available_balance = available_quota - total_expense
+    locked_savings = total_balance_with_interest - available_balance
+
+    return {
+        "records": cleaned_records,
+        "total_income": total_income,
+        "total_expense": total_expense,
+        "principal_balance": principal_balance,
+        "interest": earned_interest,
+        "total_balance": total_balance_with_interest,
+        "available_quota": available_quota,
+        "available_balance": available_balance,
+        "locked_savings": locked_savings
     }
+
+def render_speedometer_html(name, total_balance, available_balance, interest, available_quota):
+    """繪製小孩容易理解的時速表/能量儀表板"""
+    max_scale = max(available_quota, total_balance, 100)
+    # 計算可用金額在時速表上的比例 (0.0 ~ 1.0)
+    ratio = max(0.0, min(1.0, available_balance / max(available_quota, 1)))
+    # 指針角度：-90度 (最左) 到 +90度 (最右)
+    angle = -90 + (ratio * 180)
+    
+    if ratio >= 0.6:
+        status_text = "🟢 能量滿滿！可以安心規劃小願望"
+        needle_color = "#10b981"
+    elif ratio >= 0.25:
+        status_text = "🟡 能量適中！花錢前記得想一想喔"
+        needle_color = "#f59e0b"
+    else:
+        status_text = "🔴 快沒油啦！多存一點錢讓指針往右跑吧"
+        needle_color = "#ef4444"
+
+    html = f"""
+    <div style="font-family: 'Microsoft JhengHei', sans-serif; max-width: 680px; margin: 0 auto; padding: 20px; background: linear-gradient(145deg, #ffffff, #f3f6fb); border-radius: 24px; box-shadow: 0 10px 25px rgba(0,0,0,0.08); text-align: center;">
+        <h2 style="margin-bottom: 5px; color: #1e293b; font-size: 28px;">🏎️ {name} 的小銀行時速表</h2>
+        <p style="color: #64748b; margin-top: 0; font-size: 16px;">{status_text}</p>
+
+        <!-- 時速表 SVG -->
+        <div style="position: relative; width: 320px; height: 185px; margin: 15px auto 5px auto;">
+            <svg viewBox="0 0 200 115" width="100%" height="100%">
+                <!-- 背景弧線分段：紅、黃、綠 -->
+                <path d="M 20 100 A 80 80 0 0 1 60 30.7" fill="none" stroke="#ef4444" stroke-width="18" stroke-linecap="round"/>
+                <path d="M 63 29 A 80 80 0 0 1 137 29" fill="none" stroke="#f59e0b" stroke-width="18" />
+                <path d="M 140 30.7 A 80 80 0 0 1 180 100" fill="none" stroke="#10b981" stroke-width="18" stroke-linecap="round"/>
+                
+                <!-- 刻度文字 -->
+                <text x="15" y="114" font-size="9" fill="#64748b" text-anchor="middle">$0</text>
+                <text x="100" y="14" font-size="9" fill="#64748b" text-anchor="middle">一半</text>
+                <text x="185" y="114" font-size="9" fill="#64748b" text-anchor="middle">${available_quota:,}</text>
+
+                <!-- 時速表指針 -->
+                <g transform="translate(100, 100) rotate({angle})">
+                    <polygon points="-4,0 0,-72 4,0" fill="{needle_color}" />
+                    <circle cx="0" cy="0" r="8" fill="#1e293b" />
+                </g>
+            </svg>
+        </div>
+        <div style="margin-top: -10px; margin-bottom: 24px;">
+            <span style="font-size: 15px; color: #475569; font-weight: bold;">目前可花用指針位置：</span>
+            <span style="font-size: 26px; font-weight: 900; color: {needle_color};">${available_balance:,}</span>
+        </div>
+
+        <!-- 三大核心資訊圖卡 (總餘額、可用金額、利息) -->
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 10px;">
+            <div style="background: #ecfdf5; border: 2px solid #6ee7b7; border-radius: 18px; padding: 16px 8px;">
+                <div style="font-size: 28px;">🚀</div>
+                <div style="font-size: 15px; color: #065f46; font-weight: bold; margin-top: 4px;">可用金額</div>
+                <div style="font-size: 28px; font-weight: 900; color: #047857; margin-top: 4px;">${available_balance:,}</div>
+                <div style="font-size: 12px; color: #059669;">現在可以花的錢</div>
+            </div>
+
+            <div style="background: #eff6ff; border: 2px solid #93c5fd; border-radius: 18px; padding: 16px 8px;">
+                <div style="font-size: 28px;">🏦</div>
+                <div style="font-size: 15px; color: #1e40af; font-weight: bold; margin-top: 4px;">總餘額</div>
+                <div style="font-size: 28px; font-weight: 900; color: #1d4ed8; margin-top: 4px;">${total_balance:,}</div>
+                <div style="font-size: 12px; color: #2563eb;">存摺裡的全部錢</div>
+            </div>
+
+            <div style="background: #fefce8; border: 2px solid #fde047; border-radius: 18px; padding: 16px 8px;">
+                <div style="font-size: 28px;">🌱</div>
+                <div style="font-size: 15px; color: #854d0e; font-weight: bold; margin-top: 4px;">利息獎勵</div>
+                <div style="font-size: 28px; font-weight: 900; color: #ca8a04; margin-top: 4px;">+${interest:,}</div>
+                <div style="font-size: 12px; color: #a16207;">存錢長出來的小錢</div>
+            </div>
+        </div>
+    </div>
+    """
+    return html
+
+# ================= 主程式流程 =================
+try:
+    all_data = fetch_all_data()
+except Exception as e:
+    st.error(f"無法連線至 Google 試算表，請確認 GAS_URL 設定是否正確：{e}")
+    st.stop()
+
+kid_ids = list(all_data.keys())
+if not kid_ids:
+    st.warning("目前尚無小孩帳戶資料。")
+    st.stop()
+
+# 檢查網址參數是否為掃描 QR Code 進入 (例如 ?kid=kid1)
+query_params = st.query_params
+qr_kid_id = query_params.get("kid", None)
+
+# 若為掃描 QR Code 進入，直接顯示小孩專屬時速表頁面
+if qr_kid_id and qr_kid_id in all_data:
+    kid_info = all_data[qr_kid_id]
+    metrics = calculate_account_metrics(
+        kid_info.get("records", []),
+        kid_info.get("available_ratio", 0.3),
+        kid_info.get("interest_rate", 0.05)
+    )
+    st.markdown(
+        render_speedometer_html(
+            kid_info["name"],
+            metrics["total_balance"],
+            metrics["available_balance"],
+            metrics["interest"],
+            metrics["available_quota"]
+        ),
+        unsafe_allow_html=True
+    )
+    st.stop()
+
+# ================= 爸媽管理與完整檢視模式 =================
+st.sidebar.title("👨‍👩‍👧‍👦 家庭小銀行管理")
+selected_kid = st.sidebar.selectbox(
+    "選擇小孩帳戶",
+    options=kid_ids,
+    format_func=lambda k: f"{all_data[k]['name']} ({k})"
 )
 
-if st.button("💾 儲存表格修改並永久同步至 Google 試算表", type="primary"):
-    updated_records = recalc_records(edited_df)
-    with st.spinner("正在重新計算餘額並寫入 Google 試算表..."):
-        post_to_sheet({
-            "action": "save_table",
-            "kid_id": selected_kid,
-            "records": updated_records
-        })
-    st.success("✅ 表格修改已永久保存至 Google 試算表！")
-    st.rerun()
+view_mode = st.sidebar.radio("切換檢視畫面", ["📊 爸媽管理與存摺明細", "🏎️ 預覽小孩 QR Code 時速表"])
 
-# ================= 3. 側邊欄：5 名小孩設定與 QR Code =================
-with st.sidebar:
-    st.markdown("---")
-    st.subheader(f"⚙️ 【{name}】帳戶與利息設定")
-    new_name = st.text_input("小孩名稱", value=name)
-    new_ratio = st.slider("可用金額比例 (%)", 10, 100, int(ratio * 100), 5)
+current_kid = all_data[selected_kid]
+cur_ratio = float(current_kid.get("available_ratio", 0.30))
+cur_rate = float(current_kid.get("interest_rate", 0.05))
+metrics = calculate_account_metrics(current_kid.get("records", []), cur_ratio, cur_rate)
+
+# 側邊欄：QR Code 產生器
+st.sidebar.markdown("---")
+st.sidebar.subheader("📱 小孩專屬 QR Code")
+kid_qr_url = f"{APP_BASE_URL}/?kid={selected_kid}"
+qr_img_url = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={urllib.parse.quote(kid_qr_url)}"
+st.sidebar.image(qr_img_url, caption=f"掃描查看 {current_kid['name']} 的時速表", width=180)
+st.sidebar.caption(f"專屬連結：`{kid_qr_url}`")
+
+# 側邊欄：爸媽設定區 (含年利率設定)
+st.sidebar.markdown("---")
+with st.sidebar.expander("⚙️ 修改當前小孩設定 (比例 / 年利率)", expanded=False):
+    new_name = st.text_input("小孩暱稱", value=current_kid["name"])
+    new_ratio_pct = st.slider("可用額度比例 (%)", min_value=0, max_value=100, value=int(round(cur_ratio * 100)), step=5)
+    new_rate_pct = st.number_input("年利率 (%)", min_value=0.0, max_value=100.0, value=round(cur_rate * 100, 1), step=0.5)
     
-    # 新增年利率設定填入
-    new_interest_pct = st.number_input("年利率設定 (%)", min_value=0.0, max_value=50.0, value=float(annual_rate * 100), step=0.5)
-    
-    if st.button("儲存帳戶與利率設定", use_container_width=True):
-        post_to_sheet({
+    if st.button("💾 儲存設定", use_container_width=True):
+        payload = {
             "action": "update_settings",
             "kid_id": selected_kid,
             "new_name": new_name,
-            "new_ratio": new_ratio / 100.0,
-            "new_interest_rate": new_interest_pct / 100.0
-        })
+            "new_ratio": new_ratio_pct / 100.0,
+            "new_interest_rate": new_rate_pct / 100.0
+        }
+        requests.post(GAS_URL, json=payload)
+        st.cache_data.clear()
         st.success("設定已更新！")
         st.rerun()
 
-    st.markdown("---")
-    st.subheader("🖨️ 專屬查帳 QR Code")
-    auto_url = get_auto_base_url()
-    raw_url = st.text_input(
-        "你的 Streamlit 網址",
-        value=auto_url if auto_url else "https://你的網址.streamlit.app"
+# 側邊欄：新增小孩功能 (上限 5 名)
+with st.sidebar.expander(f"➕ 新增小孩帳戶 ({len(kid_ids)} / 5)", expanded=False):
+    if len(kid_ids) >= 5:
+        st.info("已達 5 名小孩上限！")
+    else:
+        add_name = st.text_input("新小孩暱稱", placeholder="例如：弟弟")
+        add_ratio_pct = st.slider("初始可用比例 (%)", 0, 100, 30, 5, key="add_ratio")
+        add_rate_pct = st.number_input("初始年利率 (%)", 0.0, 100.0, 5.0, 0.5, key="add_rate")
+        add_init_dep = st.number_input("開戶初始存款 ($)", min_value=0, value=500, step=100)
+        
+        if st.button("✨ 立即開戶", use_container_width=True):
+            if not add_name.strip():
+                st.warning("請輸入小孩暱稱！")
+            else:
+                payload = {
+                    "action": "add_kid",
+                    "name": add_name.strip(),
+                    "ratio": add_ratio_pct / 100.0,
+                    "interest_rate": add_rate_pct / 100.0,
+                    "initial_deposit": add_init_dep
+                }
+                res = requests.post(GAS_URL, json=payload).json()
+                if res.get("status") == "ok":
+                    st.cache_data.clear()
+                    st.success(f"已成功為 {add_name} 開戶！")
+                    st.rerun()
+                else:
+                    st.error(res.get("message", "新增失敗"))
+
+# ================= 畫面顯示 =================
+if view_mode == "🏎️ 預覽小孩 QR Code 時速表":
+    st.markdown(
+        render_speedometer_html(
+            current_kid["name"],
+            metrics["total_balance"],
+            metrics["available_balance"],
+            metrics["interest"],
+            metrics["available_quota"]
+        ),
+        unsafe_allow_html=True
     )
-    clean_base_url = raw_url.split("?")[0].rstrip("/")
-    target_url = f"{clean_base_url}/?kid={selected_kid}"
-    
-    if "你的網址" not in clean_base_url and clean_base_url.startswith("http"):
-        encoded_url = urllib.parse.quote(target_url, safe="")
-        qr_api_url = f"https://api.qrserver.com/v1/create-qr-code/?size=220x220&data={encoded_url}"
-        st.image(qr_api_url, caption=f"掃描直接看【{name}】的童趣時速表")
-        st.code(target_url, language="text")
+else:
+    st.subheader(f"📊 {current_kid['name']} 的帳戶金額總覽")
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("🟢 目前可花金額 (含息)", f"${metrics['available_balance']:,}", "現在可以動用的錢")
+    col2.metric("💰 總餘額 (含息總存款)", f"${metrics['total_balance']:,}", f"本金 ${metrics['principal_balance']:,} + 利息 ${metrics['interest']:,}")
+    col3.metric(f"🌱 累積利息 (年利率 {cur_rate*100:.1f}%)", f"${metrics['interest']:,}", f"鎖定儲蓄 ${metrics['locked_savings']:,}")
+    col4.metric(f"🧮 可用總額度 ({int(cur_ratio*100)}%+息)", f"${metrics['available_quota']:,}")
+    col5.metric("💸 累計已支出", f"${metrics['total_expense']:,}")
+
+    st.markdown("---")
+    st.subheader("📖 收支明細表")
+    st.caption("💡 日期已自動轉為 `YYYY/MM/DD` 數字格式，可直接雙擊表格新增或修改，完成後點選下方「儲存存摺變動」。")
+
+    df = pd.DataFrame(metrics["records"])
+    if df.empty:
+        df = pd.DataFrame(columns=["日期", "收入", "支出", "備註", "餘額"])
+
+    edited_df = st.data_editor(
+        df,
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "日期": st.column_config.TextColumn("日期 (YYYY/MM/DD)", default=date.today().strftime("%Y/%m/%d")),
+            "收入": st.column_config.NumberColumn("收入", min_value=0, default=0, step=10),
+            "支出": st.column_config.NumberColumn("支出", min_value=0, default=0, step=10),
+            "備註": st.column_config.TextColumn("備註", default=""),
+            "餘額": st.column_config.NumberColumn("本金餘額 (自動計算)", disabled=True)
+        },
+        key=f"editor_{selected_kid}"
+    )
+
+    if st.button("💾 儲存存摺變動 (同時修復雲端日期格式)", type="primary"):
+        new_records = []
+        running_bal = 0
+        for _, row in edited_df.iterrows():
+            d_val = clean_date_str(row.get("日期", ""))
+            inc_val = int(float(row.get("收入", 0) or 0))
+            exp_val = int(float(row.get("支出", 0) or 0))
+            note_val = str(row.get("備註", "") or "")
+            if not d_val and inc_val == 0 and exp_val == 0 and not note_val:
+                continue
+            running_bal += (inc_val - exp_val)
+            new_records.append({
+                "date": d_val,
+                "income": inc_val,
+                "expense": exp_val,
+                "note": note_val,
+                "balance": running_bal
+            })
+
+        payload = {
+            "action": "save_table",
+            "kid_id": selected_kid,
+            "records": new_records
+        }
+        requests.post(GAS_URL, json=payload)
+        st.cache_data.clear()
+        st.success("✅ 存摺明細與數字日期格式已成功同步至 Google 試算表！")
+        st.rerun()
