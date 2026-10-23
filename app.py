@@ -6,9 +6,9 @@ import re
 import urllib.parse
 
 # ================= 設定區 =================
-st.set_page_config(page_title="家庭小銀行存摺系統", page_icon="🏦", layout="wide")
+st.set_page_config(page_title="家庭小金庫系統", page_icon="🪙", layout="wide")
 
-# 請替換為您的 Google Apps Script 網頁應用程式網址与部署 URL
+# 請替換為您的 Google Apps Script 網頁應用程式網址與部署 URL
 GAS_URL = st.secrets.get("GAS_URL", "https://script.google.com/macros/s/AKfycbxfSRHmom9AE2qVilpbGDFShNu1JgQDq1jw1IBPrzqVwrBDKh3XqK7hs4fxG3JLzp61/exec")
 APP_BASE_URL = st.secrets.get("APP_BASE_URL", "http://localhost:8501")
 
@@ -18,11 +18,9 @@ def clean_date_str(val):
     if pd.isna(val) or not str(val).strip():
         return ""
     s = str(val).strip()
-    # 若已是 YYYY/MM/DD 或 YYYY-MM-DD
     m = re.match(r"^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})", s)
     if m:
         return f"{int(m.group(1)):04d}/{int(m.group(2)):02d}/{int(m.group(3)):02d}"
-    # 處理英文日期字串 Fri Jul 11 2025 00:00:00 GMT+0800 (...)
     s_clean = re.sub(r"\s*\(.*?\)", "", s)
     s_clean = re.sub(r"\s*GMT[+-]\d{4}", "", s_clean)
     try:
@@ -38,9 +36,7 @@ def fetch_all_data():
     return resp.json()
 
 def calculate_account_metrics(records, available_ratio, interest_rate):
-    """
-    計算本金餘額、年利率累積利息、含息總餘額、含息可用餘額
-    """
+    """計算本金餘額、年利率累積利息、含息總餘額、含息可用餘額"""
     today = date.today()
     total_income = 0
     total_expense = 0
@@ -107,11 +103,8 @@ def calculate_account_metrics(records, available_ratio, interest_rate):
     }
 
 def render_speedometer_html(name, total_balance, available_balance, interest, available_quota):
-    """繪製小孩容易理解的時速表/能量儀表板"""
-    max_scale = max(available_quota, total_balance, 100)
-    # 計算可用金額在時速表上的比例 (0.0 ~ 1.0)
+    """繪製小孩容易理解的時速表/能量儀表板（無空行與縮排，避免被 Streamlit 誤判為程式碼區塊）"""
     ratio = max(0.0, min(1.0, available_balance / max(available_quota, 1)))
-    # 指針角度：-90度 (最左) 到 +90度 (最右)
     angle = -90 + (ratio * 180)
     
     if ratio >= 0.6:
@@ -124,62 +117,51 @@ def render_speedometer_html(name, total_balance, available_balance, interest, av
         status_text = "🔴 快沒油啦！多存一點錢讓指針往右跑吧"
         needle_color = "#ef4444"
 
-    html = f"""
-    <div style="font-family: 'Microsoft JhengHei', sans-serif; max-width: 680px; margin: 0 auto; padding: 20px; background: linear-gradient(145deg, #ffffff, #f3f6fb); border-radius: 24px; box-shadow: 0 10px 25px rgba(0,0,0,0.08); text-align: center;">
-        <h2 style="margin-bottom: 5px; color: #1e293b; font-size: 28px;">🏎️ {name} 的小銀行時速表</h2>
-        <p style="color: #64748b; margin-top: 0; font-size: 16px;">{status_text}</p>
-
-        <!-- 時速表 SVG -->
-        <div style="position: relative; width: 320px; height: 185px; margin: 15px auto 5px auto;">
-            <svg viewBox="0 0 200 115" width="100%" height="100%">
-                <!-- 背景弧線分段：紅、黃、綠 -->
-                <path d="M 20 100 A 80 80 0 0 1 60 30.7" fill="none" stroke="#ef4444" stroke-width="18" stroke-linecap="round"/>
-                <path d="M 63 29 A 80 80 0 0 1 137 29" fill="none" stroke="#f59e0b" stroke-width="18" />
-                <path d="M 140 30.7 A 80 80 0 0 1 180 100" fill="none" stroke="#10b981" stroke-width="18" stroke-linecap="round"/>
-                
-                <!-- 刻度文字 -->
-                <text x="15" y="114" font-size="9" fill="#64748b" text-anchor="middle">$0</text>
-                <text x="100" y="14" font-size="9" fill="#64748b" text-anchor="middle">一半</text>
-                <text x="185" y="114" font-size="9" fill="#64748b" text-anchor="middle">${available_quota:,}</text>
-
-                <!-- 時速表指針 -->
-                <g transform="translate(100, 100) rotate({angle})">
-                    <polygon points="-4,0 0,-72 4,0" fill="{needle_color}" />
-                    <circle cx="0" cy="0" r="8" fill="#1e293b" />
-                </g>
-            </svg>
-        </div>
-        <div style="margin-top: -10px; margin-bottom: 24px;">
-            <span style="font-size: 15px; color: #475569; font-weight: bold;">目前可花用指針位置：</span>
-            <span style="font-size: 26px; font-weight: 900; color: {needle_color};">${available_balance:,}</span>
-        </div>
-
-        <!-- 三大核心資訊圖卡 (總餘額、可用金額、利息) -->
-        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 10px;">
-            <div style="background: #ecfdf5; border: 2px solid #6ee7b7; border-radius: 18px; padding: 16px 8px;">
-                <div style="font-size: 28px;">🚀</div>
-                <div style="font-size: 15px; color: #065f46; font-weight: bold; margin-top: 4px;">可用金額</div>
-                <div style="font-size: 28px; font-weight: 900; color: #047857; margin-top: 4px;">${available_balance:,}</div>
-                <div style="font-size: 12px; color: #059669;">現在可以花的錢</div>
-            </div>
-
-            <div style="background: #eff6ff; border: 2px solid #93c5fd; border-radius: 18px; padding: 16px 8px;">
-                <div style="font-size: 28px;">🏦</div>
-                <div style="font-size: 15px; color: #1e40af; font-weight: bold; margin-top: 4px;">總餘額</div>
-                <div style="font-size: 28px; font-weight: 900; color: #1d4ed8; margin-top: 4px;">${total_balance:,}</div>
-                <div style="font-size: 12px; color: #2563eb;">存摺裡的全部錢</div>
-            </div>
-
-            <div style="background: #fefce8; border: 2px solid #fde047; border-radius: 18px; padding: 16px 8px;">
-                <div style="font-size: 28px;">🌱</div>
-                <div style="font-size: 15px; color: #854d0e; font-weight: bold; margin-top: 4px;">利息獎勵</div>
-                <div style="font-size: 28px; font-weight: 900; color: #ca8a04; margin-top: 4px;">+${interest:,}</div>
-                <div style="font-size: 12px; color: #a16207;">存錢長出來的小錢</div>
-            </div>
-        </div>
-    </div>
-    """
-    return html
+    raw_html = f"""
+<div style="font-family: 'Microsoft JhengHei', sans-serif; max-width: 680px; margin: 0 auto; padding: 24px 20px; background: linear-gradient(145deg, #ffffff, #f3f6fb); border-radius: 24px; box-shadow: 0 10px 25px rgba(0,0,0,0.08); text-align: center;">
+<h2 style="margin-bottom: 6px; color: #1e293b; font-size: 30px; font-weight: 900;">🪙 {name}的小金庫</h2>
+<p style="color: #64748b; margin-top: 0; margin-bottom: 12px; font-size: 16px;">{status_text}</p>
+<div style="position: relative; width: 320px; height: 185px; margin: 10px auto 5px auto;">
+<svg viewBox="0 0 200 115" width="100%" height="100%">
+<path d="M 20 100 A 80 80 0 0 1 60 30.7" fill="none" stroke="#ef4444" stroke-width="18" stroke-linecap="round"/>
+<path d="M 63 29 A 80 80 0 0 1 137 29" fill="none" stroke="#f59e0b" stroke-width="18" />
+<path d="M 140 30.7 A 80 80 0 0 1 180 100" fill="none" stroke="#10b981" stroke-width="18" stroke-linecap="round"/>
+<text x="15" y="114" font-size="9" fill="#64748b" text-anchor="middle">$0</text>
+<text x="100" y="14" font-size="9" fill="#64748b" text-anchor="middle">一半</text>
+<text x="185" y="114" font-size="9" fill="#64748b" text-anchor="middle">${available_quota:,}</text>
+<g transform="translate(100, 100) rotate({angle})">
+<polygon points="-4,0 0,-72 4,0" fill="{needle_color}" />
+<circle cx="0" cy="0" r="8" fill="#1e293b" />
+</g>
+</svg>
+</div>
+<div style="margin-top: -10px; margin-bottom: 24px;">
+<span style="font-size: 15px; color: #475569; font-weight: bold;">目前可花用指針位置：</span>
+<span style="font-size: 26px; font-weight: 900; color: {needle_color};">${available_balance:,}</span>
+</div>
+<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 10px;">
+<div style="background: #ecfdf5; border: 2px solid #6ee7b7; border-radius: 18px; padding: 16px 8px;">
+<div style="font-size: 28px;">🚀</div>
+<div style="font-size: 15px; color: #065f46; font-weight: bold; margin-top: 4px;">可用金額</div>
+<div style="font-size: 26px; font-weight: 900; color: #047857; margin-top: 4px;">${available_balance:,}</div>
+<div style="font-size: 12px; color: #059669;">現在可以花的錢</div>
+</div>
+<div style="background: #eff6ff; border: 2px solid #93c5fd; border-radius: 18px; padding: 16px 8px;">
+<div style="font-size: 28px;">🏦</div>
+<div style="font-size: 15px; color: #1e40af; font-weight: bold; margin-top: 4px;">總餘額</div>
+<div style="font-size: 26px; font-weight: 900; color: #1d4ed8; margin-top: 4px;">${total_balance:,}</div>
+<div style="font-size: 12px; color: #2563eb;">存摺裡的全部錢</div>
+</div>
+<div style="background: #fefce8; border: 2px solid #fde047; border-radius: 18px; padding: 16px 8px;">
+<div style="font-size: 28px;">🌱</div>
+<div style="font-size: 15px; color: #854d0e; font-weight: bold; margin-top: 4px;">利息獎勵</div>
+<div style="font-size: 26px; font-weight: 900; color: #ca8a04; margin-top: 4px;">+${interest:,}</div>
+<div style="font-size: 12px; color: #a16207;">存錢長出來的小錢</div>
+</div>
+</div>
+</div>
+"""
+    return "\n".join(line.strip() for line in raw_html.splitlines() if line.strip())
 
 # ================= 主程式流程 =================
 try:
@@ -197,7 +179,7 @@ if not kid_ids:
 query_params = st.query_params
 qr_kid_id = query_params.get("kid", None)
 
-# 若為掃描 QR Code 進入，直接顯示小孩專屬時速表頁面
+# 若為掃描 QR Code 進入，直接顯示小孩專屬小金庫頁面
 if qr_kid_id and qr_kid_id in all_data:
     kid_info = all_data[qr_kid_id]
     metrics = calculate_account_metrics(
@@ -218,14 +200,14 @@ if qr_kid_id and qr_kid_id in all_data:
     st.stop()
 
 # ================= 爸媽管理與完整檢視模式 =================
-st.sidebar.title("👨‍👩‍👧‍👦 家庭小銀行管理")
+st.sidebar.title("👨‍👩‍👧‍👦 小金庫管理後台")
 selected_kid = st.sidebar.selectbox(
     "選擇小孩帳戶",
     options=kid_ids,
-    format_func=lambda k: f"{all_data[k]['name']} ({k})"
+    format_func=lambda k: f"{all_data[k]['name']}的小金庫 ({k})"
 )
 
-view_mode = st.sidebar.radio("切換檢視畫面", ["📊 爸媽管理與存摺明細", "🏎️ 預覽小孩 QR Code 時速表"])
+view_mode = st.sidebar.radio("切換檢視畫面", ["📊 爸媽管理與存摺明細", "🪙 預覽小孩小金庫時速表"])
 
 current_kid = all_data[selected_kid]
 cur_ratio = float(current_kid.get("available_ratio", 0.30))
@@ -234,16 +216,16 @@ metrics = calculate_account_metrics(current_kid.get("records", []), cur_ratio, c
 
 # 側邊欄：QR Code 產生器
 st.sidebar.markdown("---")
-st.sidebar.subheader("📱 小孩專屬 QR Code")
+st.sidebar.subheader(f"📱 {current_kid['name']}的小金庫 QR Code")
 kid_qr_url = f"{APP_BASE_URL}/?kid={selected_kid}"
 qr_img_url = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={urllib.parse.quote(kid_qr_url)}"
-st.sidebar.image(qr_img_url, caption=f"掃描查看 {current_kid['name']} 的時速表", width=180)
+st.sidebar.image(qr_img_url, caption=f"掃描查看 {current_kid['name']}的小金庫", width=180)
 st.sidebar.caption(f"專屬連結：`{kid_qr_url}`")
 
 # 側邊欄：爸媽設定區 (含年利率設定)
 st.sidebar.markdown("---")
 with st.sidebar.expander("⚙️ 修改當前小孩設定 (比例 / 年利率)", expanded=False):
-    new_name = st.text_input("小孩暱稱", value=current_kid["name"])
+    new_name = st.text_input("小孩名稱", value=current_kid["name"])
     new_ratio_pct = st.slider("可用額度比例 (%)", min_value=0, max_value=100, value=int(round(cur_ratio * 100)), step=5)
     new_rate_pct = st.number_input("年利率 (%)", min_value=0.0, max_value=100.0, value=round(cur_rate * 100, 1), step=0.5)
     
@@ -261,18 +243,18 @@ with st.sidebar.expander("⚙️ 修改當前小孩設定 (比例 / 年利率)",
         st.rerun()
 
 # 側邊欄：新增小孩功能 (上限 5 名)
-with st.sidebar.expander(f"➕ 新增小孩帳戶 ({len(kid_ids)} / 5)", expanded=False):
+with st.sidebar.expander(f"➕ 新增小孩小金庫 ({len(kid_ids)} / 5)", expanded=False):
     if len(kid_ids) >= 5:
         st.info("已達 5 名小孩上限！")
     else:
-        add_name = st.text_input("新小孩暱稱", placeholder="例如：弟弟")
+        add_name = st.text_input("新小孩名稱", placeholder="例如：Ray")
         add_ratio_pct = st.slider("初始可用比例 (%)", 0, 100, 30, 5, key="add_ratio")
         add_rate_pct = st.number_input("初始年利率 (%)", 0.0, 100.0, 5.0, 0.5, key="add_rate")
         add_init_dep = st.number_input("開戶初始存款 ($)", min_value=0, value=500, step=100)
         
         if st.button("✨ 立即開戶", use_container_width=True):
             if not add_name.strip():
-                st.warning("請輸入小孩暱稱！")
+                st.warning("請輸入小孩名稱！")
             else:
                 payload = {
                     "action": "add_kid",
@@ -284,13 +266,13 @@ with st.sidebar.expander(f"➕ 新增小孩帳戶 ({len(kid_ids)} / 5)", expande
                 res = requests.post(GAS_URL, json=payload).json()
                 if res.get("status") == "ok":
                     st.cache_data.clear()
-                    st.success(f"已成功為 {add_name} 開戶！")
+                    st.success(f"已成功建立 {add_name}的小金庫！")
                     st.rerun()
                 else:
                     st.error(res.get("message", "新增失敗"))
 
 # ================= 畫面顯示 =================
-if view_mode == "🏎️ 預覽小孩 QR Code 時速表":
+if view_mode == "🪙 預覽小孩小金庫時速表":
     st.markdown(
         render_speedometer_html(
             current_kid["name"],
@@ -302,7 +284,7 @@ if view_mode == "🏎️ 預覽小孩 QR Code 時速表":
         unsafe_allow_html=True
     )
 else:
-    st.subheader(f"📊 {current_kid['name']} 的帳戶金額總覽")
+    st.subheader(f"🪙 {current_kid['name']}的小金庫 — 金額總覽")
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("🟢 目前可花金額 (含息)", f"${metrics['available_balance']:,}", "現在可以動用的錢")
     col2.metric("💰 總餘額 (含息總存款)", f"${metrics['total_balance']:,}", f"本金 ${metrics['principal_balance']:,} + 利息 ${metrics['interest']:,}")
